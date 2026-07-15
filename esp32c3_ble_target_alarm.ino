@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <Wire.h>
 #include <math.h>
+#include <Preferences.h>
 
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -45,6 +46,7 @@ const char* AP_PASS = "12345678";
 
 WebServer server(80);
 BLEScan* bleScan = nullptr;
+Preferences prefs;
 
 // ================== Tiny SSD1306 driver ==================
 class TinySSD1306_72x40 {
@@ -248,11 +250,72 @@ String normalizeAddr(String address) {
 }
 
 String jsonEscape(String s) {
-  s.replace("\\", "\\\\");
-  s.replace("\"", "\\\"");
-  s.replace("\n", "\\n");
-  s.replace("\r", "");
-  return s;
+  String out = "";
+
+  for (int i = 0; i < s.length(); i++) {
+    uint8_t c = (uint8_t)s[i];
+
+    if (c == '\\') {
+      out += "\\\\";
+    } else if (c == '"') {
+      out += "\\\"";
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else if (c == '\t') {
+      out += "\\t";
+    } else if (c < 0x20) {
+      char buf[7];
+      sprintf(buf, "\\u%04X", c);
+      out += buf;
+    } else {
+      out += (char)c;
+    }
+  }
+
+  return out;
+}
+
+String bytesToString(const uint8_t* data, size_t len) {
+  String out = "";
+  for (size_t i = 0; i < len; i++) {
+    if (data[i] == 0) continue;
+    out += (char)data[i];
+  }
+  out.trim();
+  return out;
+}
+
+String nameFromPayload(uint8_t* payload, size_t payloadLen) {
+  if (payload == nullptr || payloadLen == 0) return "";
+
+  String shortName = "";
+  size_t pos = 0;
+
+  while (pos < payloadLen) {
+    uint8_t fieldLen = payload[pos];
+    if (fieldLen == 0) break;
+
+    size_t fieldEnd = pos + 1 + fieldLen;
+    if (fieldEnd > payloadLen || fieldLen < 1) break;
+
+    uint8_t type = payload[pos + 1];
+    const uint8_t* value = payload + pos + 2;
+    size_t valueLen = fieldLen - 1;
+
+    if (type == 0x09 && valueLen > 0) {
+      return bytesToString(value, valueLen);
+    }
+
+    if (type == 0x08 && valueLen > 0 && shortName.length() == 0) {
+      shortName = bytesToString(value, valueLen);
+    }
+
+    pos = fieldEnd;
+  }
+
+  return shortName;
 }
 
 template <typename T>
@@ -417,6 +480,40 @@ void removeMonitored(String address) {
   }
 }
 
+void saveMonitors() {
+  String list = "";
+
+  for (int i = 0; i < monitoredCount; i++) {
+    if (i > 0) list += ",";
+    list += monitoredAddresses[i];
+  }
+
+  prefs.putString("targets", list);
+}
+
+void loadMonitors() {
+  monitoredCount = 0;
+  String list = prefs.getString("targets", "");
+  int start = 0;
+
+  while (start < list.length() && monitoredCount < MAX_MONITORED) {
+    int comma = list.indexOf(',', start);
+    String addr = comma >= 0 ? list.substring(start, comma) : list.substring(start);
+    addr.trim();
+    addr = normalizeAddr(addr);
+
+    if (addr.length() > 0 && !isMonitored(addr)) {
+      monitoredAddresses[monitoredCount++] = addr;
+    }
+
+    if (comma < 0) break;
+    start = comma + 1;
+  }
+
+  Serial.print("Loaded monitored targets: ");
+  Serial.println(monitoredCount);
+}
+
 void updateBestMonitored() {
   monitoredFound = false;
   bestMonitoredRSSI = -999;
@@ -499,7 +596,12 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     int companyId = -1;
 
     if (advertisedDevice.haveName()) {
-      name = advertisedDevice.getName().c_str();
+      name = advertisedDevice.getName();
+      name.trim();
+    }
+
+    if (name.length() == 0) {
+      name = nameFromPayload(advertisedDevice.getPayload(), advertisedDevice.getPayloadLength());
     }
 
     if (advertisedDevice.haveServiceUUID()) {
@@ -827,6 +929,8 @@ void handleMonitor() {
     removeMonitored(addr);
   }
 
+  saveMonitors();
+
   for (int i = 0; i < deviceCount; i++) {
     devices[i].monitored = isMonitored(devices[i].address);
   }
@@ -838,6 +942,7 @@ void handleMonitor() {
 
 void handleClear() {
   monitoredCount = 0;
+  saveMonitors();
   for (int i = 0; i < deviceCount; i++) devices[i].monitored = false;
   updateBestMonitored();
   drawOled();
@@ -878,6 +983,9 @@ void setup() {
   Serial.print("Open: http://");
   Serial.println(WiFi.softAPIP());
 
+  prefs.begin("blemon", false);
+  loadMonitors();
+
   server.on("/", handleRoot);
   server.on("/api", handleApi);
   server.on("/monitor", handleMonitor);
@@ -887,7 +995,7 @@ void setup() {
 
   BLEDevice::init("");
   bleScan = BLEDevice::getScan();
-  bleScan->setAdvertisedDeviceCallbacks(new ScanCallbacks());
+  bleScan->setAdvertisedDeviceCallbacks(new ScanCallbacks(), true);
   bleScan->setActiveScan(true);
   bleScan->setInterval(100);
   bleScan->setWindow(99);
