@@ -1,3 +1,7 @@
+#include "version_select.h"
+
+#if BLE_ALARM_VERSION == 2
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Wire.h>
@@ -81,6 +85,8 @@ TargetOutputRule targetRules[] = {
 };
 
 const int TARGET_RULE_COUNT = sizeof(targetRules) / sizeof(targetRules[0]);
+
+String normalizeAddr(String address);
 
 WebServer server(80);
 BLEScan* bleScan = nullptr;
@@ -1173,3 +1179,5 @@ void loop() {
     lastScanMs = millis();
   }
 }
+
+#endif

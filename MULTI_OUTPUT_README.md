@@ -3,7 +3,7 @@
 这里放的是多目标、多输出接口版本：
 
 ```text
-multi_output_version/esp32c3_ble_multi_output_alarm/esp32c3_ble_multi_output_alarm.ino
+esp32c3_ble_multi_output_alarm.cpp
 ```
 
 它和主目录里的基础版不一样。基础版适合“网页勾选目标，然后 GPIO1 蜂鸣器、GPIO2 小灯、板载灯一起告警”。多接口版适合提前写好多个目标和多个输出，比如：
@@ -15,7 +15,7 @@ multi_output_version/esp32c3_ble_multi_output_alarm/esp32c3_ble_multi_output_ala
 
 ## 怎么配置
 
-打开 `esp32c3_ble_multi_output_alarm.ino`，找到这段：
+打开 `esp32c3_ble_multi_output_alarm.cpp`，找到这段：
 
 ```cpp
 TargetOutputRule targetRules[] = {
@@ -40,7 +40,13 @@ TargetOutputRule targetRules[] = {
 ## 几个版本怎么选
 
 - `esp32c3_ble_target_alarm.ino`：基础版。网页勾选目标，GPIO1 蜂鸣器、GPIO2 小灯、板载灯告警，勾选记录会保存，重启还在。
-- `multi_output_version/.../esp32c3_ble_multi_output_alarm.ino`：多接口版。适合给不同目标分配不同 GPIO，不同人/不同设备触发不同灯或蜂鸣器。
+- `esp32c3_ble_multi_output_alarm.cpp`：多接口版。适合给不同目标分配不同 GPIO，不同人/不同设备触发不同灯或蜂鸣器。
+
+烧录多接口版前，打开一级目录的 `version_select.h`，把版本改成：
+
+```cpp
+#define BLE_ALARM_VERSION 2
+```
 
 ## 可以拿来做什么
 

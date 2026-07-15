@@ -22,12 +22,24 @@
 | 版本 | 文件 | 适合场景 |
 | --- | --- | --- |
 | 基础版 | `esp32c3_ble_target_alarm.ino` | 网页勾选目标，GPIO1 蜂鸣器、GPIO2 外接灯、板载灯一起告警 |
-| 多接口版 | `multi_output_version/esp32c3_ble_multi_output_alarm/esp32c3_ble_multi_output_alarm.ino` | 多个蓝牙目标分别控制不同 GPIO，每个 GPIO 可配置成灯或无源蜂鸣器 |
+| 多接口版 | `esp32c3_ble_multi_output_alarm.cpp` | 多个蓝牙目标分别控制不同 GPIO，每个 GPIO 可配置成灯或无源蜂鸣器 |
 
 多接口版的具体配置看这里：
 
 ```text
-multi_output_version/README.md
+MULTI_OUTPUT_README.md
+```
+
+两个版本都放在一级目录。默认编译基础版；如果要烧录多接口版，打开 `version_select.h`，把：
+
+```cpp
+#define BLE_ALARM_VERSION 1
+```
+
+改成：
+
+```cpp
+#define BLE_ALARM_VERSION 2
 ```
 
 ## 硬件接线
@@ -121,4 +133,6 @@ multi_output_version/README.md
 ## 文件
 
 - `esp32c3_ble_target_alarm.ino`：主程序，OLED、BLE 扫描、网页和告警逻辑都在这里。
-- `multi_output_version/`：多目标、多 GPIO 输出版本。
+- `esp32c3_ble_multi_output_alarm.cpp`：多目标、多 GPIO 输出版本。
+- `version_select.h`：选择编译基础版还是多接口版。
+- `MULTI_OUTPUT_README.md`：多接口版配置说明。
