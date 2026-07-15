@@ -1,6 +1,3 @@
-#include "version_select.h"
-
-#if BLE_ALARM_VERSION == 1
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -1038,4 +1035,3 @@ void loop() {
   }
 }
 
-#endif

@@ -1,6 +1,3 @@
-#include "version_select.h"
-
-#if BLE_ALARM_VERSION == 3
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -487,4 +484,3 @@ void loop() {
   }
 }
 
-#endif
