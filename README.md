@@ -4,7 +4,7 @@
 
 这个项目主要是给带 0.42 寸 OLED 的 ESP32-C3 小开发板用的，代码里已经带了一个很小的 SSD1306 驱动，不用再额外装 OLED 库。
 
-仓库里现在有两个版本：基础版和多接口版。基础版适合直接烧录使用；多接口版可以给不同蓝牙设备分配不同 GPIO，让不同的灯或蜂鸣器分别响应。
+仓库里现在有四个版本：两个带 OLED 小屏，两个不带屏幕。基础版适合直接烧录使用；多接口版可以给不同蓝牙设备分配不同 GPIO，让不同的灯或蜂鸣器分别响应。
 
 ## 能做什么
 
@@ -14,15 +14,17 @@
 - 目标出现时，GPIO1 上的无源蜂鸣器会发出滴滴告警。
 - GPIO2 上的小灯泡或 LED 会跟着闪。
 - ESP32-C3 板载灯也会一起闪，没接外灯时也能看到告警。
-- OLED 会显示当前目标的大概距离。
+- 带屏版本会在 OLED 上显示当前目标的大概距离；无屏版本只用网页、蜂鸣器和灯提醒。
 - 会尽量识别常见品牌，比如 Apple、小米、华为、vivo、OPPO、三星、Google 等。
 
 ## 版本
 
 | 版本 | 文件 | 适合场景 |
 | --- | --- | --- |
-| 基础版 | `esp32c3_ble_target_alarm.ino` | 网页勾选目标，GPIO1 蜂鸣器、GPIO2 外接灯、板载灯一起告警 |
-| 多接口版 | `esp32c3_ble_multi_output_alarm.cpp` | 多个蓝牙目标分别控制不同 GPIO，每个 GPIO 可配置成灯或无源蜂鸣器 |
+| 1 带屏基础版 | `esp32c3_ble_target_alarm.ino` | 网页勾选目标，OLED 显示距离，GPIO1 蜂鸣器、GPIO2 外接灯、板载灯一起告警 |
+| 2 带屏多接口版 | `esp32c3_ble_multi_output_alarm.cpp` | OLED + 多个蓝牙目标分别控制不同 GPIO，每个 GPIO 可配置成灯或无源蜂鸣器 |
+| 3 无屏基础版 | `esp32c3_ble_no_screen_alarm.cpp` | 没有 OLED 的板子用，网页勾选目标，GPIO1/GPIO2/板载灯告警 |
+| 4 无屏多接口版 | `esp32c3_ble_no_screen_multi_output_alarm.cpp` | 没有 OLED 的板子用，多目标分别控制不同 GPIO |
 
 多接口版的具体配置看这里：
 
@@ -30,7 +32,7 @@
 MULTI_OUTPUT_README.md
 ```
 
-两个版本都放在一级目录。默认编译基础版；如果要烧录多接口版，打开 `version_select.h`，把：
+四个版本都放在一级目录。默认编译 `1 带屏基础版`；如果要烧录其他版本，打开 `version_select.h`，把：
 
 ```cpp
 #define BLE_ALARM_VERSION 1
@@ -40,6 +42,15 @@ MULTI_OUTPUT_README.md
 
 ```cpp
 #define BLE_ALARM_VERSION 2
+```
+
+可选值：
+
+```text
+1 = 带屏基础版
+2 = 带屏多接口版
+3 = 无屏基础版
+4 = 无屏多接口版
 ```
 
 ## 硬件接线
@@ -52,6 +63,8 @@ MULTI_OUTPUT_README.md
 | OLED SDA | GPIO5 |
 | OLED SCL | GPIO6 |
 | OLED 地址 | 0x3C |
+
+无屏版本不用接 OLED，也不用改 OLED 引脚。
 
 如果你的屏幕 I2C 引脚不一样，修改 `esp32c3_ble_target_alarm.ino` 顶部：
 
@@ -89,7 +102,7 @@ MULTI_OUTPUT_README.md
    - Wi-Fi：`ESP32C3-BLE`
    - 密码：`12345678`
 3. 浏览器打开 `http://192.168.4.1`。
-4. 在网页表格中勾选需要监测的蓝牙设备。
+4. 在网页表格中勾选需要监测的蓝牙设备。多接口版则先在代码顶部填好要监测的 MAC 和对应 GPIO。
 5. 被勾选设备出现在附近时：
    - OLED 显示估算距离。
    - GPIO1 无源蜂鸣器响起滴滴告警。
@@ -107,6 +120,7 @@ MULTI_OUTPUT_README.md
 - 宿舍里不想被突然打断时，提醒室友是不是回来了。
 - 给工具、钥匙、背包、蓝牙标签做靠近提示。
 - 多接口版还能做到“这个设备亮这盏灯，那个设备响那个蜂鸣器”。
+- 无屏版本适合更小的板子，塞进盒子里只留灯和蜂鸣器。
 
 上面这些有些是玩笑场景，真正用的时候别越界。更推荐用来监测自己的设备、物品标签、工具标签，或者已经明确同意被监测的设备。
 
@@ -134,5 +148,7 @@ MULTI_OUTPUT_README.md
 
 - `esp32c3_ble_target_alarm.ino`：主程序，OLED、BLE 扫描、网页和告警逻辑都在这里。
 - `esp32c3_ble_multi_output_alarm.cpp`：多目标、多 GPIO 输出版本。
+- `esp32c3_ble_no_screen_alarm.cpp`：无屏基础版。
+- `esp32c3_ble_no_screen_multi_output_alarm.cpp`：无屏多接口版。
 - `version_select.h`：选择编译基础版还是多接口版。
 - `MULTI_OUTPUT_README.md`：多接口版配置说明。
