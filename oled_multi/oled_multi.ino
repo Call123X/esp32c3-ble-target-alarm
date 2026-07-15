@@ -11,12 +11,6 @@
 #include <BLEAdvertisedDevice.h>
 
 // ================== Hardware ==================
-// User wiring:
-//   GPIO1 = passive buzzer
-//   GPIO2 = lamp / LED module
-#define BUZZER_PIN 1
-#define LAMP_PIN 2
-
 // ESP32-C3 SuperMini usually has an onboard LED on GPIO8.
 // Change this if your board uses a different onboard LED pin.
 #define BOARD_LED_PIN 8
@@ -27,9 +21,6 @@
 #define OLED_SCL_PIN 6
 #define OLED_I2C_ADDR 0x3C
 #define OLED_X_OFFSET 28
-
-// Set to 1 if your lamp module is active-low.
-#define LAMP_ACTIVE_LOW 0
 
 // Many ESP32-C3 onboard LEDs are active-low.
 #define BOARD_LED_ACTIVE_LOW 1
@@ -42,7 +33,7 @@ const char* AP_PASS = "12345678";
 #define SCAN_SECONDS 3
 #define SCAN_INTERVAL_MS 6000
 #define MAX_DEVICES 80
-#define MAX_MONITORED 16
+#define MAX_RULES 8
 
 // RSSI distance estimate. RSSI is not a real ruler; tune these on-site.
 #define RSSI_AT_1M -59
@@ -58,12 +49,13 @@ enum OutputType {
 };
 
 struct TargetOutputRule {
-  const char* address;
-  const char* label;
+  String address;
+  String label;
   uint8_t pin;
   OutputType type;
   bool activeLow;
   int toneHz;
+  bool enabled;
   bool found;
   int rssi;
   float distanceM;
@@ -71,17 +63,8 @@ struct TargetOutputRule {
   unsigned long lastToggleMs;
 };
 
-// ================== Multi-output rules ==================
-// Fill in the BLE MAC addresses you want to watch.
-// Each target can use a different GPIO and can be either a lamp/LED or a passive buzzer.
-TargetOutputRule targetRules[] = {
-  // address              label        GPIO  type                    activeLow  toneHz  runtime fields...
-  {"aa:bb:cc:dd:ee:01", "target-1",    3,   OUTPUT_LAMP,            false,     0,      false, -999, 0.0f, false, 0},
-  {"aa:bb:cc:dd:ee:02", "target-2",    4,   OUTPUT_PASSIVE_BUZZER,  false,     2300,   false, -999, 0.0f, false, 0},
-  {"aa:bb:cc:dd:ee:03", "target-3",    7,   OUTPUT_LAMP,            false,     0,      false, -999, 0.0f, false, 0},
-};
-
-const int TARGET_RULE_COUNT = sizeof(targetRules) / sizeof(targetRules[0]);
+TargetOutputRule targetRules[MAX_RULES];
+const int TARGET_RULE_COUNT = MAX_RULES;
 
 String normalizeAddr(String address);
 
@@ -240,20 +223,10 @@ struct BLEInfo {
   String name;
   int rssi;
   float distanceM;
-  String brand;
-  String deviceType;
-  String company;
-  int companyId;
-  String serviceUUID;
-  String manufacturerHex;
-  bool monitored;
 };
 
 BLEInfo devices[MAX_DEVICES];
 int deviceCount = 0;
-
-String monitoredAddresses[MAX_MONITORED];
-int monitoredCount = 0;
 
 bool monitoredFound = false;
 int bestMonitoredRSSI = -999;
@@ -263,19 +236,9 @@ String bestMonitoredAddr = "";
 
 unsigned long lastScanMs = 0;
 unsigned long lastBlinkMs = 0;
-unsigned long lastBeepMs = 0;
 bool lampState = false;
-bool beepState = false;
 
 // ================== GPIO ==================
-void lampWrite(bool on) {
-#if LAMP_ACTIVE_LOW
-  digitalWrite(LAMP_PIN, on ? LOW : HIGH);
-#else
-  digitalWrite(LAMP_PIN, on ? HIGH : LOW);
-#endif
-}
-
 void boardLedWrite(bool on) {
 #if BOARD_LED_ACTIVE_LOW
   digitalWrite(BOARD_LED_PIN, on ? LOW : HIGH);
@@ -284,16 +247,8 @@ void boardLedWrite(bool on) {
 #endif
 }
 
-void buzzerWrite(bool on) {
-  if (on) {
-    tone(BUZZER_PIN, BUZZER_FREQ_HZ);
-  } else {
-    noTone(BUZZER_PIN);
-  }
-}
-
 bool hasRuleAddress(const TargetOutputRule& rule) {
-  return rule.address != nullptr && strlen(rule.address) == 17;
+  return rule.enabled && rule.address.length() == 17;
 }
 
 void outputWrite(TargetOutputRule& rule, bool on) {
@@ -321,6 +276,62 @@ void setupConfiguredOutputs() {
   }
 }
 
+String ruleKey(int index, const char* suffix) {
+  return String("r") + String(index) + "_" + suffix;
+}
+
+void clearRuleRuntime(TargetOutputRule& rule) {
+  rule.found = false;
+  rule.rssi = -999;
+  rule.distanceM = 0.0f;
+  rule.state = false;
+  rule.lastToggleMs = 0;
+}
+
+void setRuleDefaults(int index) {
+  targetRules[index].address = "";
+  targetRules[index].label = "";
+  targetRules[index].pin = 3 + index;
+  targetRules[index].type = OUTPUT_LAMP;
+  targetRules[index].activeLow = false;
+  targetRules[index].toneHz = BUZZER_FREQ_HZ;
+  targetRules[index].enabled = false;
+  clearRuleRuntime(targetRules[index]);
+}
+
+void saveRule(int index) {
+  if (index < 0 || index >= TARGET_RULE_COUNT) return;
+  TargetOutputRule& rule = targetRules[index];
+  prefs.putString(ruleKey(index, "addr").c_str(), rule.address);
+  prefs.putString(ruleKey(index, "label").c_str(), rule.label);
+  prefs.putUChar(ruleKey(index, "pin").c_str(), rule.pin);
+  prefs.putUChar(ruleKey(index, "type").c_str(), rule.type == OUTPUT_PASSIVE_BUZZER ? 1 : 0);
+  prefs.putBool(ruleKey(index, "low").c_str(), rule.activeLow);
+  prefs.putUShort(ruleKey(index, "hz").c_str(), rule.toneHz);
+  prefs.putBool(ruleKey(index, "en").c_str(), rule.enabled);
+}
+
+void loadRules() {
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    setRuleDefaults(i);
+    targetRules[i].address = normalizeAddr(prefs.getString(ruleKey(i, "addr").c_str(), ""));
+    targetRules[i].label = prefs.getString(ruleKey(i, "label").c_str(), "");
+    targetRules[i].pin = prefs.getUChar(ruleKey(i, "pin").c_str(), 3 + i);
+    targetRules[i].type = prefs.getUChar(ruleKey(i, "type").c_str(), 0) == 1 ? OUTPUT_PASSIVE_BUZZER : OUTPUT_LAMP;
+    targetRules[i].activeLow = prefs.getBool(ruleKey(i, "low").c_str(), false);
+    targetRules[i].toneHz = prefs.getUShort(ruleKey(i, "hz").c_str(), BUZZER_FREQ_HZ);
+    targetRules[i].enabled = prefs.getBool(ruleKey(i, "en").c_str(), false) && targetRules[i].address.length() == 17;
+    clearRuleRuntime(targetRules[i]);
+  }
+}
+
+void deleteRule(int index) {
+  if (index < 0 || index >= TARGET_RULE_COUNT) return;
+  outputWrite(targetRules[index], false);
+  setRuleDefaults(index);
+  saveRule(index);
+}
+
 void resetConfiguredTargets() {
   for (int i = 0; i < TARGET_RULE_COUNT; i++) {
     targetRules[i].found = false;
@@ -335,7 +346,7 @@ void updateConfiguredTarget(String address, int rssi, float distanceM) {
   for (int i = 0; i < TARGET_RULE_COUNT; i++) {
     if (!hasRuleAddress(targetRules[i])) continue;
 
-    String ruleAddress = normalizeAddr(String(targetRules[i].address));
+    String ruleAddress = normalizeAddr(targetRules[i].address);
     if (ruleAddress != address) continue;
 
     targetRules[i].found = true;
@@ -384,6 +395,26 @@ bool updateConfiguredOutputs(unsigned long now) {
   }
 
   return anyFound;
+}
+
+void updateBestConfiguredTarget() {
+  monitoredFound = false;
+  bestMonitoredRSSI = -999;
+  bestMonitoredDistance = 0.0f;
+  bestMonitoredName = "";
+  bestMonitoredAddr = "";
+
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    TargetOutputRule& rule = targetRules[i];
+    if (!rule.found || rule.rssi < ALERT_MIN_RSSI) continue;
+    if (!monitoredFound || rule.rssi > bestMonitoredRSSI) {
+      monitoredFound = true;
+      bestMonitoredRSSI = rule.rssi;
+      bestMonitoredDistance = rule.distanceM;
+      bestMonitoredName = rule.label.length() ? rule.label : rule.address;
+      bestMonitoredAddr = rule.address;
+    }
+  }
 }
 
 // ================== Helpers ==================
@@ -461,24 +492,6 @@ String nameFromPayload(uint8_t* payload, size_t payloadLen) {
   return shortName;
 }
 
-template <typename T>
-String hexManufacturer(const T& data) {
-  String out = "";
-  for (size_t i = 0; i < data.length(); i++) {
-    char buf[4];
-    sprintf(buf, "%02X ", (uint8_t)data[i]);
-    out += buf;
-  }
-  out.trim();
-  return out;
-}
-
-template <typename T>
-int manufacturerCompanyId(const T& data) {
-  if (data.length() < 2) return -1;
-  return ((uint8_t)data[1] << 8) | (uint8_t)data[0];
-}
-
 float estimateDistanceM(int rssi) {
   if (rssi >= 0 || rssi < -120) return 0.0f;
   float ratio = ((float)RSSI_AT_1M - (float)rssi) / (10.0f * PATH_LOSS_N);
@@ -494,97 +507,6 @@ String distanceText(float d) {
   return String(d, 1) + "m";
 }
 
-bool containsText(String text, const char* needle) {
-  text.toLowerCase();
-  return text.indexOf(needle) >= 0;
-}
-
-String companyNameFromId(int id) {
-  switch (id) {
-    case 0x004C: return "Apple, Inc.";
-    case 0x038F: return "Xiaomi Inc.";
-    case 0x027D: return "HUAWEI Technologies";
-    case 0x0075: return "Samsung Electronics";
-    case 0x00E0: return "Google";
-    case 0x0006: return "Microsoft";
-    default: return id >= 0 ? String("Company ID 0x") + String(id, HEX) : "";
-  }
-}
-
-String brandFromSignals(String name, int companyId, String manufacturerHex) {
-  String text = name + " " + manufacturerHex;
-  text.toLowerCase();
-
-  if (companyId == 0x004C || containsText(text, "iphone") || containsText(text, "ipad") ||
-      containsText(text, "airpods") || containsText(text, "apple") || containsText(text, "watch")) {
-    return "Apple";
-  }
-
-  if (companyId == 0x038F || containsText(text, "xiaomi") || containsText(text, "redmi") ||
-      containsText(text, "mijia") || containsText(text, "mi band") || containsText(text, "miband") ||
-      containsText(text, "mi smart") || containsText(text, "yeelight")) {
-    return "Xiaomi / Redmi / Mijia";
-  }
-
-  if (companyId == 0x027D || containsText(text, "huawei") || containsText(text, "honor") ||
-      containsText(text, "freebuds")) {
-    return "Huawei / Honor";
-  }
-
-  if (containsText(text, "vivo") || containsText(text, "iqoo")) {
-    return "vivo / iQOO";
-  }
-
-  if (containsText(text, "oppo") || containsText(text, "oneplus") || containsText(text, "realme") ||
-      containsText(text, "enco")) {
-    return "OPPO / OnePlus / realme";
-  }
-
-  if (companyId == 0x0075 || containsText(text, "samsung") || containsText(text, "galaxy")) {
-    return "Samsung";
-  }
-
-  if (companyId == 0x00E0 || containsText(text, "pixel") || containsText(text, "google")) {
-    return "Google";
-  }
-
-  return "Unknown";
-}
-
-template <typename T>
-String applePacketType(const T& manufacturerData) {
-  if (manufacturerData.length() < 3) return "Apple BLE device";
-  uint8_t t = (uint8_t)manufacturerData[2];
-
-  switch (t) {
-    case 0x02: return "Apple iBeacon";
-    case 0x07: return "Apple Nearby";
-    case 0x10: return "Apple Nearby / Continuity";
-    case 0x12: return "Apple Handoff / Continuity";
-    case 0x19: return "Apple Nearby Action";
-    default: return String("Apple BLE type 0x") + String(t, HEX);
-  }
-}
-
-String deviceTypeFromSignals(String name, String brand, int companyId, String appleType, String serviceUUID) {
-  String text = name + " " + serviceUUID;
-  text.toLowerCase();
-
-  if (companyId == 0x004C) return appleType.length() ? appleType : "Apple BLE device";
-  if (containsText(text, "airpods") || containsText(text, "buds") || containsText(text, "earbud") ||
-      containsText(text, "headset") || containsText(text, "headphone") || containsText(text, "freebuds") ||
-      containsText(text, "enco")) {
-    return "Earbuds / headset";
-  }
-  if (containsText(text, "watch")) return "Smart watch";
-  if (containsText(text, "band") || containsText(text, "bracelet")) return "Smart band";
-  if (containsText(text, "phone") || containsText(text, "iphone") || containsText(text, "pixel")) return "Phone";
-  if (containsText(text, "mijia") || containsText(text, "mi smart") || containsText(text, "sensor")) return "Smart home / sensor";
-  if (containsText(text, "keyboard") || containsText(text, "mouse")) return "Input device";
-  if (brand != "Unknown") return brand + " BLE device";
-  return "BLE device";
-}
-
 int findDevice(String address) {
   address = normalizeAddr(address);
   for (int i = 0; i < deviceCount; i++) {
@@ -593,100 +515,10 @@ int findDevice(String address) {
   return -1;
 }
 
-bool isMonitored(String address) {
-  address = normalizeAddr(address);
-  for (int i = 0; i < monitoredCount; i++) {
-    if (monitoredAddresses[i] == address) return true;
-  }
-  return false;
-}
-
-bool addMonitored(String address) {
-  address = normalizeAddr(address);
-  if (address.length() == 0 || isMonitored(address)) return true;
-  if (monitoredCount >= MAX_MONITORED) return false;
-
-  monitoredAddresses[monitoredCount++] = address;
-  return true;
-}
-
-void removeMonitored(String address) {
-  address = normalizeAddr(address);
-  for (int i = 0; i < monitoredCount; i++) {
-    if (monitoredAddresses[i] == address) {
-      for (int j = i; j < monitoredCount - 1; j++) {
-        monitoredAddresses[j] = monitoredAddresses[j + 1];
-      }
-      monitoredCount--;
-      return;
-    }
-  }
-}
-
-void saveMonitors() {
-  String list = "";
-
-  for (int i = 0; i < monitoredCount; i++) {
-    if (i > 0) list += ",";
-    list += monitoredAddresses[i];
-  }
-
-  prefs.putString("targets", list);
-}
-
-void loadMonitors() {
-  monitoredCount = 0;
-  String list = prefs.getString("targets", "");
-  int start = 0;
-
-  while (start < list.length() && monitoredCount < MAX_MONITORED) {
-    int comma = list.indexOf(',', start);
-    String addr = comma >= 0 ? list.substring(start, comma) : list.substring(start);
-    addr.trim();
-    addr = normalizeAddr(addr);
-
-    if (addr.length() > 0 && !isMonitored(addr)) {
-      monitoredAddresses[monitoredCount++] = addr;
-    }
-
-    if (comma < 0) break;
-    start = comma + 1;
-  }
-
-  Serial.print("Loaded monitored targets: ");
-  Serial.println(monitoredCount);
-}
-
-void updateBestMonitored() {
-  monitoredFound = false;
-  bestMonitoredRSSI = -999;
-  bestMonitoredDistance = 0.0f;
-  bestMonitoredName = "";
-  bestMonitoredAddr = "";
-
-  for (int i = 0; i < deviceCount; i++) {
-    if (devices[i].monitored && devices[i].rssi >= ALERT_MIN_RSSI && devices[i].rssi > bestMonitoredRSSI) {
-      monitoredFound = true;
-      bestMonitoredRSSI = devices[i].rssi;
-      bestMonitoredDistance = devices[i].distanceM;
-      bestMonitoredName = devices[i].name.length() ? devices[i].name : devices[i].brand;
-      bestMonitoredAddr = devices[i].address;
-    }
-  }
-}
-
 void sortDevices() {
   for (int i = 0; i < deviceCount - 1; i++) {
     for (int j = i + 1; j < deviceCount; j++) {
-      bool swapNeeded = false;
-
-      if (devices[j].monitored && !devices[i].monitored) {
-        swapNeeded = true;
-      } else if (devices[j].monitored == devices[i].monitored && devices[j].rssi > devices[i].rssi) {
-        swapNeeded = true;
-      }
-
-      if (swapNeeded) {
+      if (devices[j].rssi > devices[i].rssi) {
         BLEInfo tmp = devices[i];
         devices[i] = devices[j];
         devices[j] = tmp;
@@ -699,7 +531,12 @@ void sortDevices() {
 void drawOled() {
   oled.clear();
 
-  if (monitoredCount == 0) {
+  int configuredCount = 0;
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    if (targetRules[i].enabled) configuredCount++;
+  }
+
+  if (configuredCount == 0) {
     oled.text(0, 0, "BLE MON");
     oled.hline(0, 10, 72);
     oled.text(3, 18, "SELECT", 1);
@@ -733,10 +570,6 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
     String address = normalizeAddr(advertisedDevice.getAddress().toString().c_str());
     String name = "";
-    String serviceUUID = "";
-    String manufacturerHex = "";
-    String appleType = "";
-    int companyId = -1;
 
     if (advertisedDevice.haveName()) {
       name = advertisedDevice.getName();
@@ -745,19 +578,6 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 
     if (name.length() == 0) {
       name = nameFromPayload(advertisedDevice.getPayload(), advertisedDevice.getPayloadLength());
-    }
-
-    if (advertisedDevice.haveServiceUUID()) {
-      serviceUUID = advertisedDevice.getServiceUUID().toString().c_str();
-    }
-
-    if (advertisedDevice.haveManufacturerData()) {
-      auto manufacturerData = advertisedDevice.getManufacturerData();
-      manufacturerHex = hexManufacturer(manufacturerData);
-      companyId = manufacturerCompanyId(manufacturerData);
-      if (companyId == 0x004C) {
-        appleType = applePacketType(manufacturerData);
-      }
     }
 
     int rssi = advertisedDevice.getRSSI();
@@ -770,32 +590,13 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
       devices[index].name = "";
       devices[index].rssi = -999;
       devices[index].distanceM = 0.0f;
-      devices[index].brand = "Unknown";
-      devices[index].deviceType = "BLE device";
-      devices[index].company = "";
-      devices[index].companyId = -1;
-      devices[index].serviceUUID = "";
-      devices[index].manufacturerHex = "";
-      devices[index].monitored = false;
     }
 
     if (name.length() > 0) devices[index].name = name;
-    if (serviceUUID.length() > 0) devices[index].serviceUUID = serviceUUID;
-    if (manufacturerHex.length() > 0) devices[index].manufacturerHex = manufacturerHex;
-    if (companyId >= 0) {
-      devices[index].companyId = companyId;
-      devices[index].company = companyNameFromId(companyId);
-    }
-
     if (rssi > devices[index].rssi) {
       devices[index].rssi = rssi;
       devices[index].distanceM = estimateDistanceM(rssi);
     }
-
-    String brand = brandFromSignals(devices[index].name, devices[index].companyId, devices[index].manufacturerHex);
-    devices[index].brand = brand;
-    devices[index].deviceType = deviceTypeFromSignals(devices[index].name, brand, devices[index].companyId, appleType, devices[index].serviceUUID);
-    devices[index].monitored = isMonitored(address);
 
     updateConfiguredTarget(address, devices[index].rssi, devices[index].distanceM);
   }
@@ -814,14 +615,12 @@ void performScan() {
   bleScan->start(SCAN_SECONDS, false);
   bleScan->clearResults();
   sortDevices();
-  updateBestMonitored();
+  updateBestConfiguredTarget();
   drawOled();
 
   Serial.print("Devices: ");
   Serial.print(deviceCount);
-  Serial.print(", monitored selected: ");
-  Serial.print(monitoredCount);
-  Serial.print(", monitored found: ");
+  Serial.print(", configured target found: ");
   Serial.println(monitoredFound ? "yes" : "no");
 }
 
@@ -829,14 +628,10 @@ void performScan() {
 void updateAlarm() {
   unsigned long now = millis();
   bool configuredFound = updateConfiguredOutputs(now);
-  bool anyFound = monitoredFound || configuredFound;
 
-  if (!anyFound) {
-    lampWrite(false);
+  if (!configuredFound) {
     boardLedWrite(false);
-    buzzerWrite(false);
     lampState = false;
-    beepState = false;
     return;
   }
 
@@ -845,31 +640,6 @@ void updateAlarm() {
     lastBlinkMs = now;
     lampState = !lampState;
     boardLedWrite(lampState);
-    if (monitoredFound) {
-      lampWrite(lampState);
-    }
-  }
-
-  if (!monitoredFound) {
-    lampWrite(false);
-    buzzerWrite(false);
-    beepState = false;
-    return;
-  }
-
-  int intervalMs = map(constrain(bestMonitoredRSSI, -95, -45), -95, -45, 1100, 360);
-  int beepMs = 140;
-
-  if (!beepState && now - lastBeepMs >= (unsigned long)intervalMs) {
-    beepState = true;
-    lastBeepMs = now;
-    buzzerWrite(true);
-  }
-
-  if (beepState && now - lastBeepMs >= (unsigned long)beepMs) {
-    beepState = false;
-    lastBeepMs = now;
-    buzzerWrite(false);
   }
 }
 
@@ -894,22 +664,18 @@ void handleRoot() {
     .value { font-size:18px; font-weight:700; }
     button { border:0; border-radius:7px; padding:9px 12px; color:white; background:#2563eb; font-size:14px; margin:4px 6px 4px 0; }
     button.warn { background:#dc2626; }
+    button.del { background:#dc2626; }
+    button.mini { padding:6px 8px; font-size:12px; }
+    input, select { background:#0b1220; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px; max-width:150px; }
     input[type="checkbox"] { width:20px; height:20px; accent-color:var(--ok); }
     .table-wrap { overflow-x:auto; }
     table { width:100%; min-width:1040px; border-collapse:collapse; font-size:13px; }
     th, td { border-bottom:1px solid var(--line); padding:8px; text-align:left; vertical-align:top; word-break:break-word; }
     th { color:#93c5fd; position:sticky; top:0; background:var(--panel); }
-    tr.monitored { background:rgba(245,158,11,.13); }
-    .badge { display:inline-block; border-radius:999px; padding:3px 7px; font-size:12px; font-weight:700; white-space:nowrap; }
-    .apple { background:rgba(148,163,184,.22); color:#f8fafc; }
-    .xiaomi { background:rgba(249,115,22,.2); color:#fdba74; }
-    .huawei { background:rgba(239,68,68,.2); color:#fca5a5; }
-    .oppo { background:rgba(34,197,94,.2); color:#86efac; }
-    .vivo { background:rgba(59,130,246,.2); color:#93c5fd; }
-    .unknown { background:rgba(148,163,184,.16); color:#cbd5e1; }
     .strong { color:#22c55e; font-weight:700; }
     .mid { color:#f59e0b; font-weight:700; }
     .weak { color:#fb7185; font-weight:700; }
+    .on { color:#f59e0b; font-weight:700; }
     .muted { color:var(--muted); }
     .small { color:var(--muted); font-size:12px; line-height:1.55; }
   </style>
@@ -920,31 +686,47 @@ void handleRoot() {
   <section class="panel">
     <div class="status">
       <div class="stat"><div class="label">附近 BLE</div><div id="deviceCount" class="value">-</div></div>
-      <div class="stat"><div class="label">已勾选监测</div><div id="monitoredCount" class="value">-</div></div>
+      <div class="stat"><div class="label">已配置规则</div><div id="monitoredCount" class="value">-</div></div>
       <div class="stat"><div class="label">目标状态</div><div id="targetStatus" class="value">-</div></div>
       <div class="stat"><div class="label">最近目标距离</div><div id="targetDistance" class="value">-</div></div>
     </div>
     <div style="margin-top:10px">
       <button onclick="forceScan()">立即扫描</button>
-      <button class="warn" onclick="clearMonitors()">清空监测</button>
     </div>
     <div class="small">连接热点：ESP32C3-BLE，密码：12345678，浏览器打开 http://192.168.4.1。距离由 RSSI 估算，会受人体遮挡、墙体、手机发射功率影响。</div>
+  </section>
+
+  <section class="panel table-wrap">
+    <h3>网页配置规则</h3>
+    <div class="small">在这里给蓝牙 MAC 分配 GPIO，并选择这个 GPIO 是灯还是无源蜂鸣器。保存后会写入 ESP32-C3，重启还在。</div>
+    <table>
+      <thead>
+        <tr>
+          <th>状态</th>
+          <th>备注</th>
+          <th>MAC</th>
+          <th>GPIO</th>
+          <th>类型</th>
+          <th>低电平</th>
+          <th>频率</th>
+          <th>RSSI</th>
+          <th>距离</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="ruleRows"><tr><td colspan="10">正在读取...</td></tr></tbody>
+    </table>
   </section>
 
   <section class="panel table-wrap">
     <table>
       <thead>
         <tr>
-          <th>监测</th>
           <th>信号</th>
           <th>估算距离</th>
-          <th>品牌</th>
-          <th>设备类型</th>
           <th>广播名称</th>
           <th>MAC 地址</th>
-          <th>厂商</th>
-          <th>Service UUID</th>
-          <th>厂商数据</th>
+          <th>操作</th>
         </tr>
       </thead>
       <tbody id="rows"><tr><td colspan="10">正在读取...</td></tr></tbody>
@@ -958,25 +740,12 @@ const esc = (v) => {
   return String(v ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 };
 
+const enc = (v) => encodeURIComponent(String(v ?? ""));
+
 const rssiClass = (v) => {
   if (v >= -65) return "strong";
   if (v >= -82) return "mid";
   return "weak";
-};
-
-const brandClass = (brand) => {
-  const b = String(brand || "").toLowerCase();
-  if (b.includes("apple")) return "apple";
-  if (b.includes("xiaomi") || b.includes("redmi") || b.includes("mijia")) return "xiaomi";
-  if (b.includes("huawei") || b.includes("honor")) return "huawei";
-  if (b.includes("oppo") || b.includes("oneplus") || b.includes("realme")) return "oppo";
-  if (b.includes("vivo") || b.includes("iqoo")) return "vivo";
-  return "unknown";
-};
-
-const setMonitor = async (addr, on) => {
-  await fetch(`/monitor?addr=${encodeURIComponent(addr)}&on=${on ? 1 : 0}`);
-  await loadData();
 };
 
 const forceScan = async () => {
@@ -988,16 +757,61 @@ const forceScan = async () => {
   await loadData();
 };
 
-const clearMonitors = async () => {
-  await fetch("/clear");
+const firstEmpty = (rules) => {
+  const i = rules.findIndex(r => !r.enabled);
+  return i < 0 ? 0 : i;
+};
+
+const fillFromDevice = (addr, name) => {
+  const rules = window.lastData.rules || [];
+  const i = firstEmpty(rules);
+  document.getElementById(`addr${i}`).value = addr;
+  document.getElementById(`label${i}`).value = name || addr;
+  document.getElementById(`en${i}`).checked = true;
+  window.scrollTo(0, 0);
+};
+
+const saveRule = async (i) => {
+  const q = new URLSearchParams({
+    i,
+    addr: document.getElementById(`addr${i}`).value.trim(),
+    label: document.getElementById(`label${i}`).value.trim(),
+    pin: document.getElementById(`pin${i}`).value,
+    type: document.getElementById(`type${i}`).value,
+    low: document.getElementById(`low${i}`).checked ? 1 : 0,
+    hz: document.getElementById(`hz${i}`).value,
+    en: document.getElementById(`en${i}`).checked ? 1 : 0
+  });
+  await fetch(`/rule?${q.toString()}`);
+  await loadData();
+};
+
+const delRule = async (i) => {
+  await fetch(`/delete?i=${i}`);
   await loadData();
 };
 
 const render = (data) => {
+  window.lastData = data;
   document.getElementById("deviceCount").textContent = `${data.deviceCount} 个`;
   document.getElementById("monitoredCount").textContent = `${data.monitoredCount} 个`;
-  document.getElementById("targetStatus").textContent = data.monitoredFound ? "已发现" : (data.monitoredCount ? "未发现" : "未选择");
+  document.getElementById("targetStatus").textContent = data.monitoredFound ? "已发现" : (data.monitoredCount ? "未发现" : "未配置");
   document.getElementById("targetDistance").textContent = data.monitoredFound ? data.bestDistance : "-";
+
+  document.getElementById("ruleRows").innerHTML = (data.rules || []).map(r => `
+    <tr>
+      <td>${r.found ? '<span class="on">发现</span>' : '<span class="muted">未发现</span>'}<br><label><input id="en${r.index}" type="checkbox" ${r.enabled ? "checked" : ""}>启用</label></td>
+      <td><input id="label${r.index}" value="${esc(r.label)}"></td>
+      <td><input id="addr${r.index}" value="${esc(r.address)}" placeholder="aa:bb:cc:dd:ee:ff"></td>
+      <td><input id="pin${r.index}" type="number" min="0" max="21" value="${r.pin}"></td>
+      <td><select id="type${r.index}"><option value="lamp" ${r.type === "灯" ? "selected" : ""}>灯</option><option value="buzzer" ${r.type === "蜂鸣器" ? "selected" : ""}>蜂鸣器</option></select></td>
+      <td><input id="low${r.index}" type="checkbox" ${r.activeLow ? "checked" : ""}></td>
+      <td><input id="hz${r.index}" type="number" value="${r.toneHz}"></td>
+      <td>${r.rssi}</td>
+      <td>${esc(r.distance)}</td>
+      <td><button class="mini" onclick="saveRule(${r.index})">保存</button><button class="mini del" onclick="delRule(${r.index})">删除</button></td>
+    </tr>
+  `).join("");
 
   const rows = document.getElementById("rows");
   if (!data.devices.length) {
@@ -1006,17 +820,12 @@ const render = (data) => {
   }
 
   rows.innerHTML = data.devices.map(d => `
-    <tr class="${d.monitored ? "monitored" : ""}">
-      <td><input type="checkbox" ${d.monitored ? "checked" : ""} onchange="setMonitor('${esc(d.address)}', this.checked)"></td>
+    <tr>
       <td class="${rssiClass(d.rssi)}">${d.rssi} dBm</td>
       <td>${esc(d.distance)}</td>
-      <td><span class="badge ${brandClass(d.brand)}">${esc(d.brand)}</span></td>
-      <td>${esc(d.type)}</td>
       <td>${esc(d.name || "未广播名称")}</td>
       <td>${esc(d.address)}</td>
-      <td>${esc(d.company || "-")}</td>
-      <td>${esc(d.serviceUUID || "-")}</td>
-      <td class="muted">${esc(d.manufacturer || "-")}</td>
+      <td><button class="mini" onclick="fillFromDevice(decodeURIComponent('${enc(d.address)}'),decodeURIComponent('${enc(d.name || "")}'))">填到规则</button></td>
     </tr>
   `).join("");
 };
@@ -1042,16 +851,41 @@ setInterval(loadData, 2500);
 }
 
 void handleApi() {
-  updateBestMonitored();
+  updateBestConfiguredTarget();
+  int configuredCount = 0;
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    if (targetRules[i].enabled) configuredCount++;
+  }
 
   String json = "{";
   json += "\"deviceCount\":" + String(deviceCount) + ",";
-  json += "\"monitoredCount\":" + String(monitoredCount) + ",";
+  json += "\"monitoredCount\":" + String(configuredCount) + ",";
   json += "\"monitoredFound\":" + String(monitoredFound ? "true" : "false") + ",";
   json += "\"bestRSSI\":" + String(bestMonitoredRSSI) + ",";
   json += "\"bestDistance\":\"" + jsonEscape(distanceText(bestMonitoredDistance)) + "\",";
   json += "\"bestName\":\"" + jsonEscape(bestMonitoredName) + "\",";
   json += "\"bestAddress\":\"" + jsonEscape(bestMonitoredAddr) + "\",";
+  json += "\"rules\":[";
+
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    TargetOutputRule& rule = targetRules[i];
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"index\":" + String(i) + ",";
+    json += "\"enabled\":" + String(rule.enabled ? "true" : "false") + ",";
+    json += "\"address\":\"" + jsonEscape(rule.address) + "\",";
+    json += "\"label\":\"" + jsonEscape(rule.label) + "\",";
+    json += "\"pin\":" + String(rule.pin) + ",";
+    json += "\"type\":\"" + String(rule.type == OUTPUT_PASSIVE_BUZZER ? "蜂鸣器" : "灯") + "\",";
+    json += "\"activeLow\":" + String(rule.activeLow ? "true" : "false") + ",";
+    json += "\"toneHz\":" + String(rule.toneHz) + ",";
+    json += "\"found\":" + String(rule.found ? "true" : "false") + ",";
+    json += "\"rssi\":" + String(rule.rssi) + ",";
+    json += "\"distance\":\"" + jsonEscape(distanceText(rule.distanceM)) + "\"";
+    json += "}";
+  }
+
+  json += "],";
   json += "\"devices\":[";
 
   for (int i = 0; i < deviceCount; i++) {
@@ -1060,14 +894,7 @@ void handleApi() {
     json += "\"address\":\"" + jsonEscape(devices[i].address) + "\",";
     json += "\"name\":\"" + jsonEscape(devices[i].name) + "\",";
     json += "\"rssi\":" + String(devices[i].rssi) + ",";
-    json += "\"distance\":\"" + jsonEscape(distanceText(devices[i].distanceM)) + "\",";
-    json += "\"brand\":\"" + jsonEscape(devices[i].brand) + "\",";
-    json += "\"type\":\"" + jsonEscape(devices[i].deviceType) + "\",";
-    json += "\"company\":\"" + jsonEscape(devices[i].company) + "\",";
-    json += "\"companyId\":" + String(devices[i].companyId) + ",";
-    json += "\"serviceUUID\":\"" + jsonEscape(devices[i].serviceUUID) + "\",";
-    json += "\"manufacturer\":\"" + jsonEscape(devices[i].manufacturerHex) + "\",";
-    json += "\"monitored\":" + String(devices[i].monitored ? "true" : "false");
+    json += "\"distance\":\"" + jsonEscape(distanceText(devices[i].distanceM)) + "\"";
     json += "}";
   }
 
@@ -1075,41 +902,43 @@ void handleApi() {
   server.send(200, "application/json; charset=utf-8", json);
 }
 
-void handleMonitor() {
-  String addr = server.arg("addr");
-  bool on = server.arg("on") == "1" || server.arg("on") == "true";
-
-  if (on) {
-    if (!addMonitored(addr)) {
-      server.send(507, "text/plain; charset=utf-8", "monitor list full");
-      return;
-    }
-  } else {
-    removeMonitored(addr);
-  }
-
-  saveMonitors();
-
-  for (int i = 0; i < deviceCount; i++) {
-    devices[i].monitored = isMonitored(devices[i].address);
-  }
-
-  updateBestMonitored();
-  drawOled();
-  server.send(200, "text/plain; charset=utf-8", "OK");
-}
-
-void handleClear() {
-  monitoredCount = 0;
-  saveMonitors();
-  for (int i = 0; i < deviceCount; i++) devices[i].monitored = false;
-  updateBestMonitored();
-  drawOled();
-  server.send(200, "text/plain; charset=utf-8", "OK");
-}
-
 void handleScan() {
   performScan();
+  server.send(200, "text/plain; charset=utf-8", "OK");
+}
+
+void handleRule() {
+  int index = server.arg("i").toInt();
+  if (index < 0 || index >= TARGET_RULE_COUNT) {
+    server.send(400, "text/plain; charset=utf-8", "bad rule index");
+    return;
+  }
+
+  outputWrite(targetRules[index], false);
+
+  targetRules[index].address = normalizeAddr(server.arg("addr"));
+  targetRules[index].label = server.arg("label");
+  targetRules[index].pin = (uint8_t)constrain(server.arg("pin").toInt(), 0, 21);
+  targetRules[index].type = server.arg("type") == "buzzer" ? OUTPUT_PASSIVE_BUZZER : OUTPUT_LAMP;
+  targetRules[index].activeLow = server.arg("low") == "1" || server.arg("low") == "true";
+  targetRules[index].toneHz = constrain(server.arg("hz").toInt(), 200, 8000);
+  targetRules[index].enabled = (server.arg("en") == "1" || server.arg("en") == "true") && targetRules[index].address.length() == 17;
+  clearRuleRuntime(targetRules[index]);
+  pinMode(targetRules[index].pin, OUTPUT);
+  outputWrite(targetRules[index], false);
+  saveRule(index);
+
+  server.send(200, "text/plain; charset=utf-8", "OK");
+}
+
+void handleDelete() {
+  int index = server.arg("i").toInt();
+  if (index < 0 || index >= TARGET_RULE_COUNT) {
+    server.send(400, "text/plain; charset=utf-8", "bad rule index");
+    return;
+  }
+
+  deleteRule(index);
   server.send(200, "text/plain; charset=utf-8", "OK");
 }
 
@@ -1118,13 +947,8 @@ void setup() {
   Serial.begin(115200);
   delay(800);
 
-  pinMode(LAMP_PIN, OUTPUT);
-  lampWrite(false);
   pinMode(BOARD_LED_PIN, OUTPUT);
   boardLedWrite(false);
-  pinMode(BUZZER_PIN, OUTPUT);
-  buzzerWrite(false);
-  setupConfiguredOutputs();
 
   oled.begin(OLED_I2C_ADDR, OLED_SDA_PIN, OLED_SCL_PIN);
   oled.clear();
@@ -1146,13 +970,14 @@ void setup() {
   Serial.println(WiFi.softAPIP());
 
   prefs.begin("blemon", false);
-  loadMonitors();
+  loadRules();
+  setupConfiguredOutputs();
 
   server.on("/", handleRoot);
   server.on("/api", handleApi);
-  server.on("/monitor", handleMonitor);
-  server.on("/clear", handleClear);
   server.on("/scan", handleScan);
+  server.on("/rule", handleRule);
+  server.on("/delete", handleDelete);
   server.begin();
 
   BLEDevice::init("");
@@ -1176,4 +1001,3 @@ void loop() {
     lastScanMs = millis();
   }
 }
-
