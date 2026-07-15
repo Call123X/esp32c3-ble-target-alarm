@@ -105,3 +105,5 @@ nooled_multi/nooled_multi.ino
 ## BOOT 开关 Wi-Fi 版本
 
 `oled_bootwifi/` 是单独放的带屏版本，功能和基础带屏版差不多，多了一个 BOOT 按键开关自带 Wi-Fi 热点。按一下 BOOT 关闭热点，再按一下打开热点；关闭热点后蓝牙扫描和告警还会继续跑。小屏会在按键后显示 2 秒 `WIFI ON` 或 `WIFI OFF`。
+
+`nooled_bootwifi/` 是不带屏幕的 BOOT 开关 Wi-Fi 版本，用法一样：按 BOOT 开/关热点，热点关掉以后仍然继续蓝牙扫描和告警。
