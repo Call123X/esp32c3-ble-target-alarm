@@ -51,6 +51,37 @@ const char* AP_PASS = "12345678";
 // Passive buzzer tone.
 #define BUZZER_FREQ_HZ 2300
 
+enum OutputType {
+  OUTPUT_LAMP,
+  OUTPUT_PASSIVE_BUZZER
+};
+
+struct TargetOutputRule {
+  const char* address;
+  const char* label;
+  uint8_t pin;
+  OutputType type;
+  bool activeLow;
+  int toneHz;
+  bool found;
+  int rssi;
+  float distanceM;
+  bool state;
+  unsigned long lastToggleMs;
+};
+
+// ================== Multi-output rules ==================
+// Fill in the BLE MAC addresses you want to watch.
+// Each target can use a different GPIO and can be either a lamp/LED or a passive buzzer.
+TargetOutputRule targetRules[] = {
+  // address              label        GPIO  type                    activeLow  toneHz  runtime fields...
+  {"aa:bb:cc:dd:ee:01", "target-1",    3,   OUTPUT_LAMP,            false,     0,      false, -999, 0.0f, false, 0},
+  {"aa:bb:cc:dd:ee:02", "target-2",    4,   OUTPUT_PASSIVE_BUZZER,  false,     2300,   false, -999, 0.0f, false, 0},
+  {"aa:bb:cc:dd:ee:03", "target-3",    7,   OUTPUT_LAMP,            false,     0,      false, -999, 0.0f, false, 0},
+};
+
+const int TARGET_RULE_COUNT = sizeof(targetRules) / sizeof(targetRules[0]);
+
 WebServer server(80);
 BLEScan* bleScan = nullptr;
 Preferences prefs;
@@ -256,6 +287,100 @@ void buzzerWrite(bool on) {
   } else {
     noTone(BUZZER_PIN);
   }
+}
+
+bool hasRuleAddress(const TargetOutputRule& rule) {
+  return rule.address != nullptr && strlen(rule.address) == 17;
+}
+
+void outputWrite(TargetOutputRule& rule, bool on) {
+  if (rule.type == OUTPUT_PASSIVE_BUZZER) {
+    if (on) {
+      tone(rule.pin, rule.toneHz > 0 ? rule.toneHz : BUZZER_FREQ_HZ);
+    } else {
+      noTone(rule.pin);
+    }
+    return;
+  }
+
+  if (rule.activeLow) {
+    digitalWrite(rule.pin, on ? LOW : HIGH);
+  } else {
+    digitalWrite(rule.pin, on ? HIGH : LOW);
+  }
+}
+
+void setupConfiguredOutputs() {
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    if (!hasRuleAddress(targetRules[i])) continue;
+    pinMode(targetRules[i].pin, OUTPUT);
+    outputWrite(targetRules[i], false);
+  }
+}
+
+void resetConfiguredTargets() {
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    targetRules[i].found = false;
+    targetRules[i].rssi = -999;
+    targetRules[i].distanceM = 0.0f;
+  }
+}
+
+void updateConfiguredTarget(String address, int rssi, float distanceM) {
+  address = normalizeAddr(address);
+
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    if (!hasRuleAddress(targetRules[i])) continue;
+
+    String ruleAddress = normalizeAddr(String(targetRules[i].address));
+    if (ruleAddress != address) continue;
+
+    targetRules[i].found = true;
+    if (rssi > targetRules[i].rssi) {
+      targetRules[i].rssi = rssi;
+      targetRules[i].distanceM = distanceM;
+    }
+  }
+}
+
+bool updateConfiguredOutputs(unsigned long now) {
+  bool anyFound = false;
+
+  for (int i = 0; i < TARGET_RULE_COUNT; i++) {
+    TargetOutputRule& rule = targetRules[i];
+    if (!hasRuleAddress(rule)) continue;
+
+    if (!rule.found) {
+      outputWrite(rule, false);
+      rule.state = false;
+      continue;
+    }
+
+    anyFound = true;
+
+    if (rule.type == OUTPUT_LAMP) {
+      if (now - rule.lastToggleMs >= 260) {
+        rule.lastToggleMs = now;
+        rule.state = !rule.state;
+        outputWrite(rule, rule.state);
+      }
+    } else {
+      int intervalMs = map(constrain(rule.rssi, -95, -45), -95, -45, 1100, 360);
+      int beepMs = 140;
+
+      if (!rule.state && now - rule.lastToggleMs >= (unsigned long)intervalMs) {
+        rule.lastToggleMs = now;
+        rule.state = true;
+        outputWrite(rule, true);
+      } else if (rule.state && now - rule.lastToggleMs >= (unsigned long)beepMs) {
+        rule.lastToggleMs = now;
+        rule.state = false;
+        outputWrite(rule, false);
+      }
+    }
+  }
+
+  return anyFound;
 }
 
 // ================== Helpers ==================
@@ -668,6 +793,8 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
     devices[index].brand = brand;
     devices[index].deviceType = deviceTypeFromSignals(devices[index].name, brand, devices[index].companyId, appleType, devices[index].serviceUUID);
     devices[index].monitored = isMonitored(address);
+
+    updateConfiguredTarget(address, devices[index].rssi, devices[index].distanceM);
   }
 };
 
@@ -679,6 +806,7 @@ void performScan() {
   monitoredFound = false;
   bestMonitoredRSSI = -999;
   bestMonitoredDistance = 0.0f;
+  resetConfiguredTargets();
 
   bleScan->start(SCAN_SECONDS, false);
   bleScan->clearResults();
@@ -697,8 +825,10 @@ void performScan() {
 // ================== Alarm ==================
 void updateAlarm() {
   unsigned long now = millis();
+  bool configuredFound = updateConfiguredOutputs(now);
+  bool anyFound = monitoredFound || configuredFound;
 
-  if (!monitoredFound) {
+  if (!anyFound) {
     lampWrite(false);
     boardLedWrite(false);
     buzzerWrite(false);
@@ -711,8 +841,17 @@ void updateAlarm() {
   if (now - lastBlinkMs >= (unsigned long)blinkMs) {
     lastBlinkMs = now;
     lampState = !lampState;
-    lampWrite(lampState);
     boardLedWrite(lampState);
+    if (monitoredFound) {
+      lampWrite(lampState);
+    }
+  }
+
+  if (!monitoredFound) {
+    lampWrite(false);
+    buzzerWrite(false);
+    beepState = false;
+    return;
   }
 
   int intervalMs = map(constrain(bestMonitoredRSSI, -95, -45), -95, -45, 1100, 360);
@@ -982,6 +1121,7 @@ void setup() {
   boardLedWrite(false);
   pinMode(BUZZER_PIN, OUTPUT);
   buzzerWrite(false);
+  setupConfiguredOutputs();
 
   oled.begin(OLED_I2C_ADDR, OLED_SDA_PIN, OLED_SCL_PIN);
   oled.clear();
