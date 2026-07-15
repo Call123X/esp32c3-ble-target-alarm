@@ -30,7 +30,7 @@ const char* AP_SSID = "ESP32C3-BLE";
 const char* AP_PASS = "12345678";
 
 // ================== BLE scan ==================
-#define SCAN_SECONDS 3
+#define SCAN_SECONDS 5
 #define SCAN_INTERVAL_MS 6000
 #define MAX_DEVICES 80
 #define MAX_RULES 8
@@ -39,6 +39,7 @@ const char* AP_PASS = "12345678";
 #define RSSI_AT_1M -59
 #define PATH_LOSS_N 2.2f
 #define ALERT_MIN_RSSI -98
+#define TARGET_LOST_TIMEOUT_MS 20000UL
 
 // Passive buzzer tone.
 #define BUZZER_FREQ_HZ 2300
@@ -61,6 +62,7 @@ struct TargetOutputRule {
   float distanceM;
   bool state;
   unsigned long lastToggleMs;
+  unsigned long lastSeenMs;
 };
 
 TargetOutputRule targetRules[MAX_RULES];
@@ -286,6 +288,7 @@ void clearRuleRuntime(TargetOutputRule& rule) {
   rule.distanceM = 0.0f;
   rule.state = false;
   rule.lastToggleMs = 0;
+  rule.lastSeenMs = 0;
 }
 
 void setRuleDefaults(int index) {
@@ -333,10 +336,13 @@ void deleteRule(int index) {
 }
 
 void resetConfiguredTargets() {
+  unsigned long now = millis();
   for (int i = 0; i < TARGET_RULE_COUNT; i++) {
     targetRules[i].found = false;
-    targetRules[i].rssi = -999;
-    targetRules[i].distanceM = 0.0f;
+    if (targetRules[i].lastSeenMs == 0 || now - targetRules[i].lastSeenMs > TARGET_LOST_TIMEOUT_MS) {
+      targetRules[i].rssi = -999;
+      targetRules[i].distanceM = 0.0f;
+    }
   }
 }
 
@@ -350,11 +356,14 @@ void updateConfiguredTarget(String address, int rssi, float distanceM) {
     if (ruleAddress != address) continue;
 
     targetRules[i].found = true;
-    if (rssi > targetRules[i].rssi) {
-      targetRules[i].rssi = rssi;
-      targetRules[i].distanceM = distanceM;
-    }
+    targetRules[i].rssi = rssi;
+    targetRules[i].distanceM = distanceM;
+    targetRules[i].lastSeenMs = millis();
   }
+}
+
+bool ruleActive(const TargetOutputRule& rule, unsigned long now) {
+  return rule.found || (rule.lastSeenMs != 0 && now - rule.lastSeenMs <= TARGET_LOST_TIMEOUT_MS);
 }
 
 bool updateConfiguredOutputs(unsigned long now) {
@@ -364,7 +373,7 @@ bool updateConfiguredOutputs(unsigned long now) {
     TargetOutputRule& rule = targetRules[i];
     if (!hasRuleAddress(rule)) continue;
 
-    if (!rule.found) {
+    if (!ruleActive(rule, now)) {
       outputWrite(rule, false);
       rule.state = false;
       continue;
@@ -398,6 +407,7 @@ bool updateConfiguredOutputs(unsigned long now) {
 }
 
 void updateBestConfiguredTarget() {
+  unsigned long now = millis();
   monitoredFound = false;
   bestMonitoredRSSI = -999;
   bestMonitoredDistance = 0.0f;
@@ -406,7 +416,7 @@ void updateBestConfiguredTarget() {
 
   for (int i = 0; i < TARGET_RULE_COUNT; i++) {
     TargetOutputRule& rule = targetRules[i];
-    if (!rule.found || rule.rssi < ALERT_MIN_RSSI) continue;
+    if (!ruleActive(rule, now) || rule.rssi < ALERT_MIN_RSSI) continue;
     if (!monitoredFound || rule.rssi > bestMonitoredRSSI) {
       monitoredFound = true;
       bestMonitoredRSSI = rule.rssi;
@@ -866,9 +876,11 @@ void handleApi() {
   json += "\"bestName\":\"" + jsonEscape(bestMonitoredName) + "\",";
   json += "\"bestAddress\":\"" + jsonEscape(bestMonitoredAddr) + "\",";
   json += "\"rules\":[";
+  unsigned long now = millis();
 
   for (int i = 0; i < TARGET_RULE_COUNT; i++) {
     TargetOutputRule& rule = targetRules[i];
+    bool active = ruleActive(rule, now);
     if (i > 0) json += ",";
     json += "{";
     json += "\"index\":" + String(i) + ",";
@@ -879,7 +891,7 @@ void handleApi() {
     json += "\"type\":\"" + String(rule.type == OUTPUT_PASSIVE_BUZZER ? "蜂鸣器" : "灯") + "\",";
     json += "\"activeLow\":" + String(rule.activeLow ? "true" : "false") + ",";
     json += "\"toneHz\":" + String(rule.toneHz) + ",";
-    json += "\"found\":" + String(rule.found ? "true" : "false") + ",";
+    json += "\"found\":" + String(active ? "true" : "false") + ",";
     json += "\"rssi\":" + String(rule.rssi) + ",";
     json += "\"distance\":\"" + jsonEscape(distanceText(rule.distanceM)) + "\"";
     json += "}";

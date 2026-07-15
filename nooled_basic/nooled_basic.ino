@@ -20,11 +20,12 @@
 const char* AP_SSID = "ESP32C3-BLE";
 const char* AP_PASS = "12345678";
 
-#define SCAN_SECONDS 3
+#define SCAN_SECONDS 5
 #define SCAN_INTERVAL_MS 6000
 #define MAX_DEVICES 80
 #define MAX_MONITORED 16
 #define ALERT_MIN_RSSI -98
+#define TARGET_LOST_TIMEOUT_MS 20000UL
 #define RSSI_AT_1M -59
 #define PATH_LOSS_N 2.2f
 #define BUZZER_FREQ_HZ 2300
@@ -52,6 +53,7 @@ int bestRSSI = -999;
 float bestDistanceM = 0.0f;
 String bestName = "";
 String bestAddress = "";
+unsigned long lastTargetSeenMs = 0;
 
 unsigned long lastScanMs = 0;
 unsigned long lastBlinkMs = 0;
@@ -220,22 +222,53 @@ void loadMonitors() {
 }
 
 void updateBestMonitored() {
+  if (monitoredCount == 0) {
+    monitoredFound = false;
+    bestRSSI = -999;
+    bestDistanceM = 0.0f;
+    bestName = "";
+    bestAddress = "";
+    lastTargetSeenMs = 0;
+    return;
+  }
+
+  bool foundNow = false;
+  int scanBestRSSI = -999;
+  float scanBestDistance = 0.0f;
+  String scanBestName = "";
+  String scanBestAddress = "";
+
+  for (int i = 0; i < deviceCount; i++) {
+    devices[i].monitored = isMonitored(devices[i].address);
+    if (devices[i].monitored && devices[i].rssi >= ALERT_MIN_RSSI && devices[i].rssi > scanBestRSSI) {
+      foundNow = true;
+      scanBestRSSI = devices[i].rssi;
+      scanBestDistance = devices[i].distanceM;
+      scanBestName = devices[i].name.length() ? devices[i].name : devices[i].address;
+      scanBestAddress = devices[i].address;
+    }
+  }
+
+  if (foundNow) {
+    monitoredFound = true;
+    bestRSSI = scanBestRSSI;
+    bestDistanceM = scanBestDistance;
+    bestName = scanBestName;
+    bestAddress = scanBestAddress;
+    lastTargetSeenMs = millis();
+    return;
+  }
+
+  if (lastTargetSeenMs != 0 && millis() - lastTargetSeenMs <= TARGET_LOST_TIMEOUT_MS) {
+    monitoredFound = true;
+    return;
+  }
+
   monitoredFound = false;
   bestRSSI = -999;
   bestDistanceM = 0.0f;
   bestName = "";
   bestAddress = "";
-
-  for (int i = 0; i < deviceCount; i++) {
-    devices[i].monitored = isMonitored(devices[i].address);
-    if (devices[i].monitored && devices[i].rssi >= ALERT_MIN_RSSI && devices[i].rssi > bestRSSI) {
-      monitoredFound = true;
-      bestRSSI = devices[i].rssi;
-      bestDistanceM = devices[i].distanceM;
-      bestName = devices[i].name.length() ? devices[i].name : devices[i].address;
-      bestAddress = devices[i].address;
-    }
-  }
 }
 
 void sortDevices() {
@@ -289,8 +322,6 @@ class ScanCallbacks : public BLEAdvertisedDeviceCallbacks {
 
 void performScan() {
   deviceCount = 0;
-  monitoredFound = false;
-  bestRSSI = -999;
 
   bleScan->start(SCAN_SECONDS, false);
   bleScan->clearResults();
@@ -483,4 +514,3 @@ void loop() {
     lastScanMs = millis();
   }
 }
-
